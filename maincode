@@ -1,0 +1,75 @@
+def get_qubit_op(molecule,remove_orbitals):
+    driver = qiskit_nature.drivers.second_quantization.ElectronicStructureMoleculeDriver(
+        molecule=molecule,
+        basis="sto3g",
+        driver_type=qiskit_nature.drivers.second_quantization.ElectronicStructureDriverType.PYSCF)
+
+    # Define Problem, Use freeze core approximation, remove orbitals.
+    problem = qiskit_nature.problems.second_quantization.ElectronicStructureProblem(
+        driver,
+        remove_orbitals)
+
+    second_q_ops = problem.second_q_ops()  # Get 2nd Quant OP
+    num_spin_orbitals = problem.num_spin_orbitals
+    num_particles = problem.num_particles
+
+    mapper = qiskit_nature.mappers.second_quantization.ParityMapper()  # Set Mapper
+    hamiltonian = second_q_ops[0]  # Set Hamiltonian
+    # Do two qubit reduction
+    converter = qiskit_nature.converters.second_quantization.QubitConverter(mapper,two_qubit_reduction=True)
+    reducer = qiskit.opflow.TwoQubitReduction(num_particles)
+    qubit_op = converter.convert(hamiltonian)
+    qubit_op = reducer.convert(qubit_op)
+
+    return qubit_op, num_particles, num_spin_orbitals, problem, converter
+    
+    def exact_solver(problem, converter):
+    solver = qiskit_nature.algorithms.NumPyMinimumEigensolverFactory()
+    calc = qiskit_nature.algorithms.GroundStateEigensolver(converter, solver)
+    result = calc.solve(problem)
+    return result
+
+backend = qiskit.BasicAer.get_backend("statevector_simulator")
+distances = np.arange(0.5, 4.0, 0.2)
+exact_energies = []
+vqe_energies = []
+optimizer = qiskit.algorithms.optimizers.SLSQP(maxiter=5)
+for dist in distances:
+    # Define Molecule
+    molecule = Molecule(
+        # Coordinates in Angstrom
+        geometry=[
+            ["Li", [0.0, 0.0, 0.0] ],
+            ["H", [dist, 0.0, 0.0] ]
+        ],
+        multiplicity=1,  # = 2*spin + 1
+        charge=0,
+    )
+    (qubit_op, num_particles, num_spin_orbitals,
+                             problem, converter) = get_qubit_op(molecule,
+                                                                [qiskit_nature.transformers.second_quantization.electronic.FreezeCoreTransformer(
+                                                                    freeze_core=True,
+                                                                    remove_orbitals=[-3,-2])])
+    result = exact_solver(problem,converter)
+    exact_energies.append(result.total_energies[0].real)
+    init_state = qiskit_nature.circuit.library.HartreeFock(num_spin_orbitals, num_particles, converter)
+    var_form = qiskit_nature.circuit.library.UCCSD(converter,
+                     num_particles,
+                     num_spin_orbitals,
+                     initial_state=init_state)
+    vqe = VQE(var_form, optimizer, quantum_instance=backend)
+    vqe_calc = vqe.compute_minimum_eigenvalue(qubit_op)
+    vqe_result = problem.interpret(vqe_calc).total_energies[0].real
+    vqe_energies.append(vqe_result)
+    print(f"Interatomic Distance: {np.round(dist, 2)}",
+          f"VQE Result: {vqe_result:.5f}",
+          f"Exact Energy: {exact_energies[-1]:.5f}")
+
+print("All energies have been calculated")
+
+plt.plot(distances, exact_energies, label="Exact Energy")
+plt.plot(distances, vqe_energies, label="VQE Energy")
+plt.xlabel('Atomic distance (Angstrom)')
+plt.ylabel('Energy')
+plt.legend()
+plt.show()
